@@ -2418,10 +2418,12 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 		|| (MLME_IS_MESH(padapter) && !plink)
 		#endif
 	) {
-		RTW_INFO(FUNC_NDEV_FMT" no sta info for mac="MAC_FMT"\n"
-			, FUNC_NDEV_ARG(ndev), MAC_ARG(mac));
-		ret = -ENOENT;
-		goto exit;
+		if (!(check_fwstate(pmlmepriv, WIFI_STATION_STATE) && check_fwstate(pmlmepriv, WIFI_ASOC_STATE))) {
+			RTW_INFO(FUNC_NDEV_FMT" no sta info for mac="MAC_FMT"\n"
+				, FUNC_NDEV_ARG(ndev), MAC_ARG(mac));
+			ret = -ENOENT;
+			goto exit;
+		}
 	}
 
 #ifdef CONFIG_DEBUG_CFG80211
@@ -2434,7 +2436,9 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 	) {
 		struct wlan_network  *cur_network = &(pmlmepriv->cur_network);
 
-		if (_rtw_memcmp((u8 *)mac, cur_network->network.MacAddress, ETH_ALEN) == _FALSE) {
+		if (_rtw_memcmp((u8 *)mac, cur_network->network.MacAddress, ETH_ALEN) == _FALSE
+			&& _rtw_memcmp((u8 *)mac, adapter_mac_addr(padapter), ETH_ALEN) == _FALSE
+		) {
 			RTW_INFO("%s, mismatch bssid="MAC_FMT"\n", __func__, MAC_ARG(cur_network->network.MacAddress));
 			ret = -ENOENT;
 			goto exit;
@@ -2445,6 +2449,11 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 
 		sinfo->filled |= STATION_INFO_TX_BITRATE;
 		sinfo->txrate.legacy = rtw_get_cur_max_rate(padapter);
+		if (sinfo->txrate.legacy == 0)
+			sinfo->txrate.legacy = 108; /* Fallback to 54Mbps (in 500kbps units) if psta not ready */
+
+		sinfo->filled |= STATION_INFO_RX_BITRATE;
+		sinfo->rxrate.legacy = sinfo->txrate.legacy;
 	}
 
 	if (psta) {
@@ -2487,7 +2496,13 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 		rtw_rate_idx = psta->curr_rx_rate & 0x7f;
 		sgi = (psta->curr_rx_rate & 0x80) >> 7;
 		bw = psta->cmn.bw_mode;
-		sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		if (rtw_rate_idx == 0 && psta->wireless_mode != WIRELESS_11B) {
+			sinfo->rxrate.legacy = rtw_get_cur_max_rate(padapter);
+			if (sinfo->rxrate.legacy == 0)
+				sinfo->rxrate.legacy = 108;
+		} else {
+			sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		}
 #endif
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37))
 		if (rtw_get_sta_tx_stat(padapter, psta->cmn.mac_id, psta->cmn.mac_addr) != RTW_NOT_SUPPORT) {
@@ -6135,6 +6150,13 @@ struct sta_info *rtw_sta_info_get_by_idx(struct sta_priv *pstapriv, const int id
 	if (asoc_list_num)
 		*asoc_list_num = i;
 
+	if (psta == NULL && idx == 0) {
+		_adapter *padapter = pstapriv->padapter;
+		if (check_fwstate(&padapter->mlmepriv, WIFI_STATION_STATE) && check_fwstate(&padapter->mlmepriv, WIFI_ASOC_STATE)) {
+			psta = rtw_get_stainfo(pstapriv, get_bssid(&padapter->mlmepriv));
+		}
+	}
+
 	return psta;
 }
 
@@ -6219,7 +6241,13 @@ static int	cfg80211_rtw_dump_station(struct wiphy *wiphy, struct net_device *nde
 		rtw_rate_idx = psta->curr_rx_rate & 0x7f;
 		sgi = (psta->curr_rx_rate & 0x80) >> 7;
 		bw = psta->cmn.bw_mode;
-		sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		if (rtw_rate_idx == 0 && psta->wireless_mode != WIRELESS_11B) {
+			sinfo->rxrate.legacy = rtw_get_cur_max_rate(padapter);
+			if (sinfo->rxrate.legacy == 0)
+				sinfo->rxrate.legacy = 108;
+		} else {
+			sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		}
 #endif
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37))
 		if (rtw_get_sta_tx_stat(padapter, psta->cmn.mac_id, psta->cmn.mac_addr) != RTW_NOT_SUPPORT) {
