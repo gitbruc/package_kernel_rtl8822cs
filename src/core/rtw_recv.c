@@ -4744,9 +4744,9 @@ void rx_query_phy_status(
 		&& !(get_frame_sub_type(wlanhdr) & BIT(6)) /* don't count NULL data */
 	) {
 		if (is_ra_bmc)
-			psta->curr_rx_rate_bmc = pattrib->data_rate;
+			psta->curr_rx_rate_bmc = pattrib->data_rate | (pattrib->sgi << 7);
 		else
-			psta->curr_rx_rate = pattrib->data_rate;
+			psta->curr_rx_rate = pattrib->data_rate | (pattrib->sgi << 7);
 	}
 	pkt_info.data_rate = pattrib->data_rate;
 

@@ -2287,7 +2287,7 @@ static void rtw_cfg80211_fill_mesh_only_sta_info(struct mesh_plink_ent *plink, s
 	sinfo->plink_state = rtw_plink_state_to_nl80211_plink_state(plink->plink_state);
 	if (!sta && plink->scanned) {
 		sinfo->filled |= STATION_INFO_SIGNAL;
-		sinfo->signal = translate_percentage_to_dbm(plink->scanned->network.PhyInfo.SignalStrength);
+		sinfo->signal = 100 * translate_percentage_to_dbm(plink->scanned->network.PhyInfo.SignalStrength);
 		sinfo->filled |= STATION_INFO_INACTIVE_TIME;
 		if (plink->plink_state == RTW_MESH_PLINK_UNKNOWN)
 			sinfo->inactive_time = 0 - 1;
@@ -2418,10 +2418,12 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 		|| (MLME_IS_MESH(padapter) && !plink)
 		#endif
 	) {
-		RTW_INFO(FUNC_NDEV_FMT" no sta info for mac="MAC_FMT"\n"
-			, FUNC_NDEV_ARG(ndev), MAC_ARG(mac));
-		ret = -ENOENT;
-		goto exit;
+		if (!(check_fwstate(pmlmepriv, WIFI_STATION_STATE) && check_fwstate(pmlmepriv, WIFI_ASOC_STATE))) {
+			RTW_INFO(FUNC_NDEV_FMT" no sta info for mac="MAC_FMT"\n"
+				, FUNC_NDEV_ARG(ndev), MAC_ARG(mac));
+			ret = -ENOENT;
+			goto exit;
+		}
 	}
 
 #ifdef CONFIG_DEBUG_CFG80211
@@ -2434,17 +2436,24 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 	) {
 		struct wlan_network  *cur_network = &(pmlmepriv->cur_network);
 
-		if (_rtw_memcmp((u8 *)mac, cur_network->network.MacAddress, ETH_ALEN) == _FALSE) {
+		if (_rtw_memcmp((u8 *)mac, cur_network->network.MacAddress, ETH_ALEN) == _FALSE
+			&& _rtw_memcmp((u8 *)mac, adapter_mac_addr(padapter), ETH_ALEN) == _FALSE
+		) {
 			RTW_INFO("%s, mismatch bssid="MAC_FMT"\n", __func__, MAC_ARG(cur_network->network.MacAddress));
 			ret = -ENOENT;
 			goto exit;
 		}
 
 		sinfo->filled |= STATION_INFO_SIGNAL;
-		sinfo->signal = translate_percentage_to_dbm(padapter->recvpriv.signal_strength);
+		sinfo->signal = 100 * translate_percentage_to_dbm(padapter->recvpriv.signal_strength);
 
 		sinfo->filled |= STATION_INFO_TX_BITRATE;
 		sinfo->txrate.legacy = rtw_get_cur_max_rate(padapter);
+		if (sinfo->txrate.legacy == 0)
+			sinfo->txrate.legacy = 108; /* Fallback to 54Mbps (in 500kbps units) if psta not ready */
+
+		sinfo->filled |= STATION_INFO_RX_BITRATE;
+		sinfo->rxrate.legacy = sinfo->txrate.legacy;
 	}
 
 	if (psta) {
@@ -2454,7 +2463,7 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 			|| check_fwstate(pmlmepriv, WIFI_ASOC_STATE) == _FALSE
 		) {
 			sinfo->filled |= STATION_INFO_SIGNAL;
-			sinfo->signal = translate_percentage_to_dbm(psta->cmn.rssi_stat.rssi);
+			sinfo->signal = 100 * translate_percentage_to_dbm(psta->cmn.rssi_stat.rssi);
 		}
 		sinfo->filled |= STATION_INFO_INACTIVE_TIME;
 		sinfo->inactive_time = rtw_get_passing_time_ms(psta->sta_stats.last_rx_time);
@@ -2487,7 +2496,13 @@ static int cfg80211_rtw_get_station(struct wiphy *wiphy,
 		rtw_rate_idx = psta->curr_rx_rate & 0x7f;
 		sgi = (psta->curr_rx_rate & 0x80) >> 7;
 		bw = psta->cmn.bw_mode;
-		sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		if (rtw_rate_idx == 0 && psta->wireless_mode != WIRELESS_11B) {
+			sinfo->rxrate.legacy = rtw_get_cur_max_rate(padapter);
+			if (sinfo->rxrate.legacy == 0)
+				sinfo->rxrate.legacy = 108;
+		} else {
+			sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		}
 #endif
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37))
 		if (rtw_get_sta_tx_stat(padapter, psta->cmn.mac_id, psta->cmn.mac_addr) != RTW_NOT_SUPPORT) {
@@ -6135,6 +6150,13 @@ struct sta_info *rtw_sta_info_get_by_idx(struct sta_priv *pstapriv, const int id
 	if (asoc_list_num)
 		*asoc_list_num = i;
 
+	if (psta == NULL && idx == 0) {
+		_adapter *padapter = pstapriv->padapter;
+		if (check_fwstate(&padapter->mlmepriv, WIFI_STATION_STATE) && check_fwstate(&padapter->mlmepriv, WIFI_ASOC_STATE)) {
+			psta = rtw_get_stainfo(pstapriv, get_bssid(&padapter->mlmepriv));
+		}
+	}
+
 	return psta;
 }
 
@@ -6189,10 +6211,52 @@ static int	cfg80211_rtw_dump_station(struct wiphy *wiphy, struct net_device *nde
 	sinfo->filled = 0;
 
 	if (psta) {
+		u8 rtw_rate_idx, sgi, bw;
+
 		sinfo->filled |= STATION_INFO_SIGNAL;
-		sinfo->signal = translate_percentage_to_dbm(psta->cmn.rssi_stat.rssi);
+		sinfo->signal = 100 * translate_percentage_to_dbm(psta->cmn.rssi_stat.rssi);
 		sinfo->filled |= STATION_INFO_INACTIVE_TIME;
 		sinfo->inactive_time = rtw_get_passing_time_ms(psta->sta_stats.last_rx_time);
+		sinfo->filled |= STATION_INFO_RX_PACKETS;
+		sinfo->rx_packets = sta_rx_data_pkts(psta);
+		sinfo->filled |= STATION_INFO_TX_PACKETS;
+		sinfo->tx_packets = psta->sta_stats.tx_pkts;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0))
+		sinfo->filled |= STATION_INFO_RX_BYTES64;
+		sinfo->filled |= STATION_INFO_TX_BYTES64;
+#else
+		sinfo->filled |= STATION_INFO_RX_BYTES;
+		sinfo->filled |= STATION_INFO_TX_BYTES;
+#endif
+		sinfo->rx_bytes = psta->sta_stats.rx_bytes;
+		sinfo->tx_bytes = psta->sta_stats.tx_bytes;
+
+		sinfo->filled |= STATION_INFO_TX_BITRATE;
+		rtw_rate_idx = rtw_get_current_tx_rate(padapter, psta);
+		sgi = rtw_get_current_tx_sgi(padapter, psta);
+		bw = psta->cmn.bw_mode;
+		sta_set_rate_info(padapter, &sinfo->txrate, rtw_rate_idx, sgi, bw);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 39))
+		sinfo->filled |= STATION_INFO_RX_BITRATE;
+		rtw_rate_idx = psta->curr_rx_rate & 0x7f;
+		sgi = (psta->curr_rx_rate & 0x80) >> 7;
+		bw = psta->cmn.bw_mode;
+		if (rtw_rate_idx == 0 && psta->wireless_mode != WIRELESS_11B) {
+			sinfo->rxrate.legacy = rtw_get_cur_max_rate(padapter);
+			if (sinfo->rxrate.legacy == 0)
+				sinfo->rxrate.legacy = 108;
+		} else {
+			sta_set_rate_info(padapter, &sinfo->rxrate, rtw_rate_idx, sgi, bw);
+		}
+#endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 37))
+		if (rtw_get_sta_tx_stat(padapter, psta->cmn.mac_id, psta->cmn.mac_addr) != RTW_NOT_SUPPORT) {
+			sinfo->filled |= STATION_INFO_TX_FAILED;
+			sinfo->filled |= STATION_INFO_TX_RETRIES;
+			sinfo->tx_failed = psta->sta_stats.tx_fail_cnt_sum;
+			sinfo->tx_retries = psta->sta_stats.tx_retry_cnt_sum;
+		}
+#endif
 	}
 
 #ifdef CONFIG_RTW_MESH

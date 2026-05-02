@@ -748,7 +748,7 @@ s16 rtw_adapter_get_oper_txpwr_max_mbm(_adapter *adapter, bool eirp)
 {
 	s16 mbm = -100 * MBM_PDBM;
 
-	if (MLME_IS_ASOC(adapter)) {
+	if (MLME_IS_ASOC(adapter) || MLME_IS_AP(adapter)) {
 		struct mlme_ext_priv *mlmeext = &adapter->mlmeextpriv;
 		u8 ch = mlmeext->cur_channel;
 		u8 bw = mlmeext->cur_bwmode;
